@@ -1,37 +1,25 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { db } from './firebase';
+import { doc, setDoc, getDoc, collection, getDocs } from 'firebase/firestore';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const USER_ID = 'henry';
 
 const C = {
-  bg: '#0f1923',
-  card: '#1a2634',
-  cardBorder: '#243447',
-  green: '#53d22c',
-  greenDark: '#3aa81e',
-  greenGlow: 'rgba(83,210,44,0.15)',
-  text: '#ffffff',
-  textMuted: '#8a9bb0',
-  textDim: '#4a5f75',
-  red: '#ff4757',
-  yellow: '#ffa502',
-  blue: '#1e90ff',
-  purple: '#a855f7',
+  bg: '#0f1923', card: '#1a2634', cardBorder: '#243447',
+  green: '#53d22c', greenDark: '#3aa81e', greenGlow: 'rgba(83,210,44,0.15)',
+  text: '#ffffff', textMuted: '#8a9bb0', textDim: '#4a5f75',
+  red: '#ff4757', yellow: '#ffa502', blue: '#1e90ff', purple: '#a855f7',
 };
 
-function getTodayStr() {
-  return new Date().toISOString().split('T')[0];
-}
-function getTodayDayIndex() {
-  return new Date().getDay();
-}
+function getTodayStr() { return new Date().toISOString().split('T')[0]; }
+function getTodayDayIndex() { return new Date().getDay(); }
 
 function calculateTDEE(metrics) {
   const { weight, height, age, sex, activity, goal, pace } = metrics;
   const weightKg = weight * 0.453592;
   const heightCm = ((parseInt(height.split("'")[0]) * 12) + parseInt(height.split("'")[1] || 0)) * 2.54;
-  let bmr = sex === 'male'
-    ? 10 * weightKg + 6.25 * heightCm - 5 * age + 5
-    : 10 * weightKg + 6.25 * heightCm - 5 * age - 161;
+  let bmr = sex === 'male' ? 10 * weightKg + 6.25 * heightCm - 5 * age + 5 : 10 * weightKg + 6.25 * heightCm - 5 * age - 161;
   const activityMap = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, very_active: 1.9 };
   let tdee = bmr * (activityMap[activity] || 1.55);
   const paceCalories = { 0.5: 250, 1: 500, 1.5: 750, 2: 1000 };
@@ -52,18 +40,98 @@ function calculateMacros(calories, goal) {
   };
 }
 
+// ─── FIREBASE HELPERS ─────────────────────────────────────────────────────────
+async function saveToFirebase(path, data) {
+  try {
+    await setDoc(doc(db, 'users', USER_ID, ...path.split('/')), data, { merge: true });
+  } catch (e) { console.error('Save error:', e); }
+}
+
+async function loadFromFirebase(path) {
+  try {
+    const snap = await getDoc(doc(db, 'users', USER_ID, ...path.split('/')));
+    return snap.exists() ? snap.data() : null;
+  } catch (e) { console.error('Load error:', e); return null; }
+}
+
+async function loadCollection(path) {
+  try {
+    const snap = await getDocs(collection(db, 'users', USER_ID, ...path.split('/')));
+    const result = {};
+    snap.forEach(d => { result[d.id] = d.data(); });
+    return result;
+  } catch (e) { console.error('Load collection error:', e); return {}; }
+}
+
+// ─── APP ──────────────────────────────────────────────────────────────────────
 function App() {
   const [page, setPage] = useState('home');
   const [healthMetrics, setHealthMetrics] = useState(null);
   const [setupDone, setSetupDone] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [foodLog, setFoodLog] = useState({});
   const [weightLog, setWeightLog] = useState([]);
   const [checkIns, setCheckIns] = useState({});
+  const [dailyTodos, setDailyTodos] = useState([]);
+  const [longTodos, setLongTodos] = useState([]);
 
-  function handleSetupComplete(metrics) {
+  // Load all data on startup
+  useEffect(() => {
+    async function loadAll() {
+      const metrics = await loadFromFirebase('settings/metrics');
+      if (metrics) {
+        setHealthMetrics(metrics);
+        setSetupDone(true);
+      }
+      const food = await loadCollection('foodLog');
+      setFoodLog(food || {});
+      const weights = await loadFromFirebase('weightLog/entries');
+      setWeightLog(weights?.entries || []);
+      const checkins = await loadCollection('checkIns');
+      setCheckIns(checkins || {});
+      const dtodos = await loadFromFirebase('todos/daily');
+      setDailyTodos(dtodos?.items || [
+        { id: 1, text: 'Drink 8 glasses of water', done: false, repeatType: 'everyday', repeatDays: [], repeatEvery: 1, startDate: getTodayStr() },
+        { id: 2, text: 'Take vitamins', done: false, repeatType: 'everyday', repeatDays: [], repeatEvery: 1, startDate: getTodayStr() },
+      ]);
+      const ltodos = await loadFromFirebase('todos/longterm');
+      setLongTodos(ltodos?.items || []);
+      setLoading(false);
+    }
+    loadAll();
+  }, []);
+
+  // Auto-save whenever data changes
+  useEffect(() => { if (healthMetrics) saveToFirebase('settings/metrics', healthMetrics); }, [healthMetrics]);
+  useEffect(() => { if (!loading) saveToFirebase('weightLog/entries', { entries: weightLog }); }, [weightLog]);
+  useEffect(() => { if (!loading) saveToFirebase('todos/daily', { items: dailyTodos }); }, [dailyTodos]);
+  useEffect(() => { if (!loading) saveToFirebase('todos/longterm', { items: longTodos }); }, [longTodos]);
+
+  async function saveFoodLog(newLog) {
+    const today = getTodayStr();
+    setFoodLog(newLog);
+    if (newLog[today]) await setDoc(doc(db, 'users', USER_ID, 'foodLog', today), newLog[today]);
+  }
+
+  async function saveCheckIn(date, data) {
+    setCheckIns(prev => ({ ...prev, [date]: data }));
+    await setDoc(doc(db, 'users', USER_ID, 'checkIns', date), data);
+  }
+
+  async function handleSetupComplete(metrics) {
     setHealthMetrics(metrics);
     setSetupDone(true);
+    await saveToFirebase('settings/metrics', metrics);
     setPage('home');
+  }
+
+  if (loading) {
+    return (
+      <div style={{ fontFamily: "'Segoe UI', Arial, sans-serif", maxWidth: '430px', margin: '0 auto', minHeight: '100vh', backgroundColor: C.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '16px' }}>
+        <p style={{ fontSize: '40px' }}>💚</p>
+        <p style={{ color: C.green, fontWeight: '800', fontSize: '18px', letterSpacing: '1px' }}>LOADING...</p>
+      </div>
+    );
   }
 
   if (!setupDone) {
@@ -72,9 +140,11 @@ function App() {
 
   const sharedProps = {
     setPage, healthMetrics, setHealthMetrics,
-    foodLog, setFoodLog,
+    foodLog, setFoodLog: saveFoodLog,
     weightLog, setWeightLog,
-    checkIns, setCheckIns,
+    checkIns, setCheckIns: saveCheckIn,
+    dailyTodos, setDailyTodos,
+    longTodos, setLongTodos,
   };
 
   return (
@@ -129,8 +199,7 @@ function DashboardPage({ setPage, healthMetrics, foodLog, weightLog, checkIns })
   const weightChange = currentWeight - healthMetrics.weight;
 
   return (
-    <div style={{ padding: '0 0 20px' }}>
-      {/* Header */}
+    <div style={{ paddingBottom: '20px' }}>
       <div style={{ background: `linear-gradient(135deg, #0f1923 0%, #1a2634 100%)`, padding: '24px 20px 20px', borderBottom: `2px solid ${C.green}` }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
@@ -145,8 +214,6 @@ function DashboardPage({ setPage, healthMetrics, foodLog, weightLog, checkIns })
       </div>
 
       <div style={{ padding: '16px' }}>
-
-        {/* Morning Check-in Prompt */}
         {!todayCheckIn && (
           <button onClick={() => setPage('checkin')}
             style={{ width: '100%', padding: '14px 16px', backgroundColor: C.greenGlow, border: `1px solid ${C.green}`, borderRadius: '12px', cursor: 'pointer', textAlign: 'left', marginBottom: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -158,39 +225,19 @@ function DashboardPage({ setPage, healthMetrics, foodLog, weightLog, checkIns })
           </button>
         )}
 
-        {/* Sleep Card */}
-        {todayCheckIn && (
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '14px' }}>
-            <DashCard label="SLEEP" style={{ flex: 1 }}>
-              <p style={{ margin: '4px 0 0', fontSize: '28px', fontWeight: '800', color: todayCheckIn.sleep < 6 ? C.red : todayCheckIn.sleep < 7 ? C.yellow : C.green }}>
-                {todayCheckIn.sleep}<span style={{ fontSize: '14px', color: C.textMuted }}> hrs</span>
-              </p>
-            </DashCard>
-            <DashCard label="WEIGHT" style={{ flex: 1 }}>
-              <p style={{ margin: '4px 0 0', fontSize: '28px', fontWeight: '800', color: C.text }}>
-                {currentWeight}<span style={{ fontSize: '14px', color: C.textMuted }}> lbs</span>
-              </p>
-              <p style={{ margin: '2px 0 0', fontSize: '11px', color: weightChange <= 0 ? C.green : C.red }}>
-                {weightChange <= 0 ? '▼' : '▲'} {Math.abs(weightChange).toFixed(1)} from start
-              </p>
-            </DashCard>
-          </div>
-        )}
+        <div style={{ display: 'flex', gap: '10px', marginBottom: '14px' }}>
+          <DashCard label="SLEEP" style={{ flex: 1 }}>
+            {todayCheckIn
+              ? <p style={{ margin: '4px 0 0', fontSize: '28px', fontWeight: '800', color: todayCheckIn.sleep < 6 ? C.red : todayCheckIn.sleep < 7 ? C.yellow : C.green }}>{todayCheckIn.sleep}<span style={{ fontSize: '14px', color: C.textMuted }}> hrs</span></p>
+              : <p style={{ margin: '4px 0 0', fontSize: '14px', color: C.textDim }}>Not logged</p>
+            }
+          </DashCard>
+          <DashCard label="WEIGHT" style={{ flex: 1 }}>
+            <p style={{ margin: '4px 0 0', fontSize: '28px', fontWeight: '800', color: C.text }}>{currentWeight}<span style={{ fontSize: '14px', color: C.textMuted }}> lbs</span></p>
+            <p style={{ margin: '2px 0 0', fontSize: '11px', color: weightChange <= 0 ? C.green : C.red }}>{weightChange <= 0 ? '▼' : '▲'} {Math.abs(weightChange).toFixed(1)} from start</p>
+          </DashCard>
+        </div>
 
-        {!todayCheckIn && (
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '14px' }}>
-            <DashCard label="SLEEP" style={{ flex: 1 }}>
-              <p style={{ margin: '4px 0 0', fontSize: '14px', color: C.textDim }}>Not logged</p>
-            </DashCard>
-            <DashCard label="WEIGHT" style={{ flex: 1 }}>
-              <p style={{ margin: '4px 0 0', fontSize: '28px', fontWeight: '800', color: C.text }}>
-                {currentWeight}<span style={{ fontSize: '14px', color: C.textMuted }}> lbs</span>
-              </p>
-            </DashCard>
-          </div>
-        )}
-
-        {/* Calories Card */}
         <DashCard label="CALORIES TODAY" style={{ marginBottom: '14px' }} onPress={() => setPage('calories')}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: '4px' }}>
             <p style={{ margin: 0, fontSize: '32px', fontWeight: '800', color: remaining < 0 ? C.red : C.green }}>
@@ -206,31 +253,29 @@ function DashboardPage({ setPage, healthMetrics, foodLog, weightLog, checkIns })
           <p style={{ margin: '6px 0 0', fontSize: '12px', color: C.textMuted }}>{calPct}% of daily goal</p>
         </DashCard>
 
-        {/* Today's Goals */}
         {todayCheckIn && (todayCheckIn.physical || todayCheckIn.mental || todayCheckIn.spiritual) && (
           <DashCard label="TODAY'S GOALS" style={{ marginBottom: '14px' }}>
             {todayCheckIn.physical && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 0', borderBottom: `1px solid ${C.cardBorder}` }}>
                 <span style={{ fontSize: '16px' }}>💪</span>
-                <p style={{ margin: 0, fontSize: '14px', color: C.text, flex: 1 }}>{todayCheckIn.physical}</p>
+                <p style={{ margin: 0, fontSize: '14px', color: C.text }}>{todayCheckIn.physical}</p>
               </div>
             )}
             {todayCheckIn.mental && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 0', borderBottom: `1px solid ${C.cardBorder}` }}>
                 <span style={{ fontSize: '16px' }}>🧠</span>
-                <p style={{ margin: 0, fontSize: '14px', color: C.text, flex: 1 }}>{todayCheckIn.mental}</p>
+                <p style={{ margin: 0, fontSize: '14px', color: C.text }}>{todayCheckIn.mental}</p>
               </div>
             )}
             {todayCheckIn.spiritual && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 0' }}>
                 <span style={{ fontSize: '16px' }}>🕊️</span>
-                <p style={{ margin: 0, fontSize: '14px', color: C.text, flex: 1 }}>{todayCheckIn.spiritual}</p>
+                <p style={{ margin: 0, fontSize: '14px', color: C.text }}>{todayCheckIn.spiritual}</p>
               </div>
             )}
           </DashCard>
         )}
 
-        {/* Weight Progress */}
         <DashCard label="WEIGHT GOAL" style={{ marginBottom: '14px' }} onPress={() => setPage('weight')}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '6px' }}>
             <div>
@@ -245,11 +290,8 @@ function DashboardPage({ setPage, healthMetrics, foodLog, weightLog, checkIns })
           <div style={{ backgroundColor: '#0f1923', borderRadius: '6px', height: '8px', overflow: 'hidden', marginTop: '10px' }}>
             <div style={{ width: `${Math.min(100, Math.max(0, (Math.abs(weightChange) / Math.abs(healthMetrics.weight - healthMetrics.goalWeight)) * 100))}%`, height: '100%', backgroundColor: C.yellow, borderRadius: '6px' }} />
           </div>
-          <p style={{ margin: '6px 0 0', fontSize: '12px', color: C.textMuted }}>
-            {Math.abs(currentWeight - healthMetrics.goalWeight).toFixed(1)} lbs to go
-          </p>
+          <p style={{ margin: '6px 0 0', fontSize: '12px', color: C.textMuted }}>{Math.abs(currentWeight - healthMetrics.goalWeight).toFixed(1)} lbs to go</p>
         </DashCard>
-
       </div>
     </div>
   );
@@ -257,8 +299,7 @@ function DashboardPage({ setPage, healthMetrics, foodLog, weightLog, checkIns })
 
 function DashCard({ label, children, style = {}, onPress }) {
   return (
-    <div onClick={onPress}
-      style={{ backgroundColor: C.card, border: `1px solid ${C.cardBorder}`, borderRadius: '12px', padding: '14px 16px', cursor: onPress ? 'pointer' : 'default', ...style }}>
+    <div onClick={onPress} style={{ backgroundColor: C.card, border: `1px solid ${C.cardBorder}`, borderRadius: '12px', padding: '14px 16px', cursor: onPress ? 'pointer' : 'default', ...style }}>
       <p style={{ margin: 0, fontSize: '11px', fontWeight: '700', color: C.green, letterSpacing: '1px' }}>{label}</p>
       {children}
     </div>
@@ -268,35 +309,21 @@ function DashCard({ label, children, style = {}, onPress }) {
 // ─── SETUP FLOW ───────────────────────────────────────────────────────────────
 function SetupFlow({ onComplete }) {
   const [step, setStep] = useState(0);
-  const [metrics, setMetrics] = useState({
-    name: '', age: '', sex: 'male', weight: '', heightFt: '', heightIn: '',
-    activity: 'moderate', goal: 'lose', pace: 1, goalWeight: '',
-  });
-
+  const [metrics, setMetrics] = useState({ name: '', age: '', sex: 'male', weight: '', heightFt: '', heightIn: '', activity: 'moderate', goal: 'lose', pace: 1, goalWeight: '' });
   function update(key, val) { setMetrics(prev => ({ ...prev, [key]: val })); }
   function next() { setStep(s => s + 1); }
   function back() { setStep(s => s - 1); }
-
   function finish() {
-    const finalMetrics = {
-      ...metrics,
-      height: `${metrics.heightFt}'${metrics.heightIn}`,
-      weight: parseFloat(metrics.weight),
-      age: parseInt(metrics.age),
-      pace: parseFloat(metrics.pace),
-      goalWeight: parseFloat(metrics.goalWeight),
-    };
-    onComplete(finalMetrics);
+    onComplete({ ...metrics, height: `${metrics.heightFt}'${metrics.heightIn}`, weight: parseFloat(metrics.weight), age: parseInt(metrics.age), pace: parseFloat(metrics.pace), goalWeight: parseFloat(metrics.goalWeight) });
   }
 
   const steps = [
     <div style={setupCard}>
       <p style={setupEmoji}>👋</p>
       <p style={setupTitle}>Welcome to Your Life App</p>
-      <p style={setupSub}>Let's set up your health profile so we can personalize everything for you. This only takes 2 minutes.</p>
+      <p style={setupSub}>Let's set up your health profile. This only takes 2 minutes.</p>
       <GreenButton onClick={next}>LET'S GO</GreenButton>
     </div>,
-
     <div style={setupCard}>
       <p style={setupStep}>Step 1 of 5</p>
       <p style={setupTitle}>Basic Info</p>
@@ -310,12 +337,8 @@ function SetupFlow({ onComplete }) {
           <button key={val} onClick={() => update('sex', val)} style={pillBtn(metrics.sex === val)}>{label}</button>
         ))}
       </div>
-      <div style={{ display: 'flex', gap: '10px' }}>
-        <OutlineButton onClick={back}>Back</OutlineButton>
-        <GreenButton onClick={next}>Next</GreenButton>
-      </div>
+      <div style={{ display: 'flex', gap: '10px' }}><OutlineButton onClick={back}>Back</OutlineButton><GreenButton onClick={next}>Next</GreenButton></div>
     </div>,
-
     <div style={setupCard}>
       <p style={setupStep}>Step 2 of 5</p>
       <p style={setupTitle}>Body Metrics</p>
@@ -326,76 +349,46 @@ function SetupFlow({ onComplete }) {
         <SetupInput placeholder="ft" type="number" value={metrics.heightFt} onChange={e => update('heightFt', e.target.value)} style={{ marginBottom: 0 }} />
         <SetupInput placeholder="in" type="number" value={metrics.heightIn} onChange={e => update('heightIn', e.target.value)} style={{ marginBottom: 0 }} />
       </div>
-      <div style={{ display: 'flex', gap: '10px' }}>
-        <OutlineButton onClick={back}>Back</OutlineButton>
-        <GreenButton onClick={next}>Next</GreenButton>
-      </div>
+      <div style={{ display: 'flex', gap: '10px' }}><OutlineButton onClick={back}>Back</OutlineButton><GreenButton onClick={next}>Next</GreenButton></div>
     </div>,
-
     <div style={setupCard}>
       <p style={setupStep}>Step 3 of 5</p>
       <p style={setupTitle}>Activity Level</p>
-      {[
-        ['sedentary', '🪑 Sedentary', 'Little or no exercise'],
-        ['light', '🚶 Lightly Active', 'Exercise 1-3 days/week'],
-        ['moderate', '🏃 Moderately Active', 'Exercise 3-5 days/week'],
-        ['active', '💪 Very Active', 'Exercise 6-7 days/week'],
-        ['very_active', '🔥 Extremely Active', 'Physical job + daily exercise'],
-      ].map(([val, label, sub]) => (
-        <button key={val} onClick={() => update('activity', val)}
-          style={{ width: '100%', padding: '12px 14px', marginBottom: '8px', backgroundColor: metrics.activity === val ? C.greenGlow : '#0f1923', border: `1px solid ${metrics.activity === val ? C.green : C.cardBorder}`, borderRadius: '10px', cursor: 'pointer', textAlign: 'left' }}>
+      {[['sedentary','🪑 Sedentary','Little or no exercise'],['light','🚶 Lightly Active','Exercise 1-3 days/week'],['moderate','🏃 Moderately Active','Exercise 3-5 days/week'],['active','💪 Very Active','Exercise 6-7 days/week'],['very_active','🔥 Extremely Active','Physical job + daily exercise']].map(([val, label, sub]) => (
+        <button key={val} onClick={() => update('activity', val)} style={{ width: '100%', padding: '12px 14px', marginBottom: '8px', backgroundColor: metrics.activity === val ? C.greenGlow : '#0f1923', border: `1px solid ${metrics.activity === val ? C.green : C.cardBorder}`, borderRadius: '10px', cursor: 'pointer', textAlign: 'left' }}>
           <p style={{ margin: 0, fontWeight: '700', fontSize: '14px', color: metrics.activity === val ? C.green : C.text }}>{label}</p>
           <p style={{ margin: '2px 0 0', fontSize: '12px', color: C.textMuted }}>{sub}</p>
         </button>
       ))}
-      <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
-        <OutlineButton onClick={back}>Back</OutlineButton>
-        <GreenButton onClick={next}>Next</GreenButton>
-      </div>
+      <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}><OutlineButton onClick={back}>Back</OutlineButton><GreenButton onClick={next}>Next</GreenButton></div>
     </div>,
-
     <div style={setupCard}>
       <p style={setupStep}>Step 4 of 5</p>
       <p style={setupTitle}>Your Goal</p>
       <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
-        {[['lose', '📉 Lose Weight'], ['maintain', '⚖️ Maintain'], ['gain', '📈 Gain Weight']].map(([val, label]) => (
-          <button key={val} onClick={() => update('goal', val)}
-            style={{ flex: 1, padding: '12px 6px', borderRadius: '10px', border: `1px solid ${metrics.goal === val ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: metrics.goal === val ? C.greenGlow : '#0f1923', color: metrics.goal === val ? C.green : C.textMuted, fontWeight: '700', fontSize: '12px' }}>
-            {label}
-          </button>
+        {[['lose','📉 Lose Weight'],['maintain','⚖️ Maintain'],['gain','📈 Gain Weight']].map(([val, label]) => (
+          <button key={val} onClick={() => update('goal', val)} style={{ flex: 1, padding: '12px 6px', borderRadius: '10px', border: `1px solid ${metrics.goal === val ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: metrics.goal === val ? C.greenGlow : '#0f1923', color: metrics.goal === val ? C.green : C.textMuted, fontWeight: '700', fontSize: '12px' }}>{label}</button>
         ))}
       </div>
       {metrics.goal !== 'maintain' && (
         <>
           <SetupLabel>Weekly Pace (lbs/week)</SetupLabel>
           <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
-            {['0.5', '1', '1.5', '2'].map(p => (
-              <button key={p} onClick={() => update('pace', p)}
-                style={{ flex: 1, padding: '10px 6px', borderRadius: '10px', border: `1px solid ${String(metrics.pace) === p ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: String(metrics.pace) === p ? C.greenGlow : '#0f1923', color: String(metrics.pace) === p ? C.green : C.textMuted, fontWeight: '700', fontSize: '13px' }}>
-                {p} lb
-              </button>
+            {['0.5','1','1.5','2'].map(p => (
+              <button key={p} onClick={() => update('pace', p)} style={{ flex: 1, padding: '10px 6px', borderRadius: '10px', border: `1px solid ${String(metrics.pace) === p ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: String(metrics.pace) === p ? C.greenGlow : '#0f1923', color: String(metrics.pace) === p ? C.green : C.textMuted, fontWeight: '700', fontSize: '13px' }}>{p} lb</button>
             ))}
           </div>
         </>
       )}
-      <div style={{ display: 'flex', gap: '10px' }}>
-        <OutlineButton onClick={back}>Back</OutlineButton>
-        <GreenButton onClick={next}>Next</GreenButton>
-      </div>
+      <div style={{ display: 'flex', gap: '10px' }}><OutlineButton onClick={back}>Back</OutlineButton><GreenButton onClick={next}>Next</GreenButton></div>
     </div>,
-
     <div style={setupCard}>
       <p style={setupStep}>Step 5 of 5</p>
       <p style={setupTitle}>Goal Weight</p>
-      <p style={{ color: C.textMuted, fontSize: '14px', marginBottom: '20px', textAlign: 'center', lineHeight: '1.6' }}>
-        What's your target weight? This shows as a goal line on your weight chart.
-      </p>
+      <p style={{ color: C.textMuted, fontSize: '14px', marginBottom: '20px', textAlign: 'center', lineHeight: '1.6' }}>What's your target weight?</p>
       <SetupLabel>Goal Weight (lbs)</SetupLabel>
       <SetupInput placeholder="e.g. 160" type="number" value={metrics.goalWeight} onChange={e => update('goalWeight', e.target.value)} />
-      <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
-        <OutlineButton onClick={back}>Back</OutlineButton>
-        <GreenButton onClick={finish}>FINISH SETUP</GreenButton>
-      </div>
+      <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}><OutlineButton onClick={back}>Back</OutlineButton><GreenButton onClick={finish}>FINISH SETUP</GreenButton></div>
     </div>,
   ];
 
@@ -416,10 +409,7 @@ function SetupLabel({ children }) {
   return <p style={{ fontSize: '12px', fontWeight: '700', color: C.textMuted, letterSpacing: '1px', textTransform: 'uppercase', margin: '0 0 8px' }}>{children}</p>;
 }
 function SetupInput({ placeholder, value, onChange, type = 'text', style = {} }) {
-  return (
-    <input type={type} placeholder={placeholder} value={value} onChange={onChange}
-      style={{ width: '100%', padding: '12px 14px', backgroundColor: '#0f1923', border: `1px solid ${C.cardBorder}`, borderRadius: '8px', fontSize: '15px', color: C.text, boxSizing: 'border-box', marginBottom: '14px', outline: 'none', ...style }} />
-  );
+  return <input type={type} placeholder={placeholder} value={value} onChange={onChange} style={{ width: '100%', padding: '12px 14px', backgroundColor: '#0f1923', border: `1px solid ${C.cardBorder}`, borderRadius: '8px', fontSize: '15px', color: C.text, boxSizing: 'border-box', marginBottom: '14px', outline: 'none', ...style }} />;
 }
 
 // ─── CHECK IN PAGE ────────────────────────────────────────────────────────────
@@ -435,30 +425,22 @@ function CheckInPage({ setPage, checkIns, setCheckIns }) {
   const [spiritual, setSpiritual] = useState(existing.spiritual || '');
   const [saved, setSaved] = useState(false);
   const [activeTab, setActiveTab] = useState('today');
+  const sleepColor = sleep < 6 ? C.red : sleep < 7 ? C.yellow : C.green;
+  const history = Object.values(checkIns).sort((a, b) => b.date?.localeCompare(a.date));
+  const sleepData = history.slice(0, 7).reverse();
 
-  function handleSave() {
-    setCheckIns(prev => ({
-      ...prev,
-      [today]: { sleep, grateful1, grateful2, grateful3, physical, mental, spiritual, date: today }
-    }));
+  async function handleSave() {
+    await setCheckIns(today, { sleep, grateful1, grateful2, grateful3, physical, mental, spiritual, date: today });
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
   }
 
-  const sleepColor = sleep < 6 ? C.red : sleep < 7 ? C.yellow : C.green;
-  const history = Object.values(checkIns).sort((a, b) => b.date.localeCompare(a.date));
-  const sleepData = history.slice(0, 7).reverse();
-
   return (
     <div style={{ padding: '20px 16px' }}>
       <p style={{ fontSize: '20px', fontWeight: '800', marginBottom: '16px' }}>🌅 Morning Check-in</p>
-
       <div style={{ display: 'flex', marginBottom: '20px', backgroundColor: C.card, borderRadius: '10px', padding: '4px', border: `1px solid ${C.cardBorder}` }}>
         {[['today', "Today's Check-in"], ['history', '📋 History']].map(([key, label]) => (
-          <button key={key} onClick={() => setActiveTab(key)}
-            style={{ flex: 1, padding: '10px', border: 'none', cursor: 'pointer', borderRadius: '8px', backgroundColor: activeTab === key ? C.green : 'transparent', color: activeTab === key ? C.bg : C.textMuted, fontWeight: '700', fontSize: '13px' }}>
-            {label}
-          </button>
+          <button key={key} onClick={() => setActiveTab(key)} style={{ flex: 1, padding: '10px', border: 'none', cursor: 'pointer', borderRadius: '8px', backgroundColor: activeTab === key ? C.green : 'transparent', color: activeTab === key ? C.bg : C.textMuted, fontWeight: '700', fontSize: '13px' }}>{label}</button>
         ))}
       </div>
 
@@ -473,7 +455,6 @@ function CheckInPage({ setPage, checkIns, setCheckIns }) {
             </div>
           </Card>
 
-          {/* Sleep History Mini Chart */}
           {sleepData.length > 1 && (
             <Card>
               <SectionLabel>Sleep This Week</SectionLabel>
@@ -517,18 +498,17 @@ function CheckInPage({ setPage, checkIns, setCheckIns }) {
 
       {activeTab === 'history' && (
         <>
-          {history.length === 0 && (
-            <p style={{ textAlign: 'center', color: C.textMuted, padding: '40px 0' }}>No check-ins yet — complete your first one!</p>
-          )}
+          {history.length === 0 && <p style={{ textAlign: 'center', color: C.textMuted, padding: '40px 0' }}>No check-ins yet!</p>}
           {history.map(entry => {
+            if (!entry.date) return null;
             const d = new Date(entry.date + 'T00:00:00');
             const dateStr = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-            const sleepColor = entry.sleep < 6 ? C.red : entry.sleep < 7 ? C.yellow : C.green;
+            const sc = entry.sleep < 6 ? C.red : entry.sleep < 7 ? C.yellow : C.green;
             return (
               <Card key={entry.date}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                   <p style={{ margin: 0, fontSize: '14px', fontWeight: '700', color: C.text }}>{dateStr}</p>
-                  <p style={{ margin: 0, fontSize: '18px', fontWeight: '800', color: sleepColor }}>{entry.sleep}h sleep</p>
+                  <p style={{ margin: 0, fontSize: '18px', fontWeight: '800', color: sc }}>{entry.sleep}h sleep</p>
                 </div>
                 {(entry.grateful1 || entry.grateful2 || entry.grateful3) && (
                   <div style={{ marginBottom: '8px' }}>
@@ -580,8 +560,7 @@ function WeightPage({ setPage, healthMetrics, weightLog, setWeightLog }) {
 
   function getWeeklyAvgChange() {
     if (weightLog.length < 2) return null;
-    const first = weightLog[0];
-    const last = weightLog[weightLog.length - 1];
+    const first = weightLog[0], last = weightLog[weightLog.length - 1];
     const days = Math.max(1, (new Date(last.date) - new Date(first.date)) / (1000 * 60 * 60 * 24));
     return ((last.weight - first.weight) / (days / 7)).toFixed(1);
   }
@@ -599,18 +578,15 @@ function WeightPage({ setPage, healthMetrics, weightLog, setWeightLog }) {
   function getInsights() {
     const insights = [];
     const weeklyChange = parseFloat(getWeeklyAvgChange());
-    if (weightLog.length < 2) {
-      insights.push({ icon: '📝', text: "Log your weight for a few days and we'll start giving you personalized insights!" });
-      return insights;
-    }
+    if (weightLog.length < 2) { insights.push({ icon: '📝', text: "Log your weight for a few days and we'll start giving you personalized insights!" }); return insights; }
     if (healthMetrics.goal === 'lose') {
-      if (weeklyChange > 0) insights.push({ icon: '⚠️', text: 'Your weight is trending up. Try reducing calories by 200-300 per day or increasing activity.' });
-      else if (weeklyChange < -2) insights.push({ icon: '⚠️', text: `You're losing ${Math.abs(weeklyChange)} lbs/week which is faster than recommended. Consider eating a little more to preserve muscle.` });
+      if (weeklyChange > 0) insights.push({ icon: '⚠️', text: 'Your weight is trending up. Try reducing calories by 200-300 per day.' });
+      else if (weeklyChange < -2) insights.push({ icon: '⚠️', text: `You're losing ${Math.abs(weeklyChange)} lbs/week which is faster than recommended.` });
       else insights.push({ icon: '✅', text: `Great pace! You're losing about ${Math.abs(weeklyChange)} lbs/week.` });
     }
     if (healthMetrics.goal === 'gain') {
-      if (weeklyChange < 0) insights.push({ icon: '⚠️', text: 'Your weight is trending down. Try increasing your daily calories by 200-300.' });
-      else insights.push({ icon: '✅', text: `Solid progress! You're gaining ${weeklyChange} lbs/week at a healthy pace.` });
+      if (weeklyChange < 0) insights.push({ icon: '⚠️', text: 'Your weight is trending down. Try increasing your daily calories.' });
+      else insights.push({ icon: '✅', text: `Solid progress! You're gaining ${weeklyChange} lbs/week.` });
     }
     if (healthMetrics.goal === 'maintain') {
       if (Math.abs(weeklyChange) < 0.5) insights.push({ icon: '✅', text: 'Your weight is very stable. Great job maintaining!' });
@@ -626,15 +602,11 @@ function WeightPage({ setPage, healthMetrics, weightLog, setWeightLog }) {
   }
 
   function WeightChart() {
-    if (weightLog.length < 2) {
-      return <div style={{ textAlign: 'center', padding: '30px', color: C.textMuted, fontSize: '14px' }}>Log at least 2 days of weight to see your chart</div>;
-    }
+    if (weightLog.length < 2) return <div style={{ textAlign: 'center', padding: '30px', color: C.textMuted, fontSize: '14px' }}>Log at least 2 days of weight to see your chart</div>;
     const allValues = [...weightLog.map(e => e.weight), goalWeight];
-    const minW = Math.min(...allValues) - 2;
-    const maxW = Math.max(...allValues) + 2;
+    const minW = Math.min(...allValues) - 2, maxW = Math.max(...allValues) + 2;
     const W = 340, H = 180, padL = 40, padR = 20, padT = 10, padB = 30;
-    const chartW = W - padL - padR;
-    const chartH = H - padT - padB;
+    const chartW = W - padL - padR, chartH = H - padT - padB;
     function xPos(i) { return padL + (i / (weightLog.length - 1)) * chartW; }
     function yPos(w) { return padT + ((maxW - w) / (maxW - minW)) * chartH; }
     const points = weightLog.map((e, i) => `${xPos(i)},${yPos(e.weight)}`).join(' ');
@@ -653,9 +625,7 @@ function WeightPage({ setPage, healthMetrics, weightLog, setWeightLog }) {
         <line x1={padL} y1={goalY} x2={W - padR} y2={goalY} stroke={C.yellow} strokeWidth="1.5" strokeDasharray="6,4" />
         <text x={W - padR + 2} y={goalY} fill={C.yellow} fontSize="9" dominantBaseline="middle">Goal</text>
         <polyline points={points} fill="none" stroke={C.green} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
-        {weightLog.map((e, i) => (
-          <circle key={i} cx={xPos(i)} cy={yPos(e.weight)} r="4" fill={C.green} stroke={C.bg} strokeWidth="2" />
-        ))}
+        {weightLog.map((e, i) => <circle key={i} cx={xPos(i)} cy={yPos(e.weight)} r="4" fill={C.green} stroke={C.bg} strokeWidth="2" />)}
         {weightLog.map((e, i) => {
           if (weightLog.length > 7 && i % 2 !== 0) return null;
           const d = new Date(e.date + 'T00:00:00');
@@ -670,10 +640,7 @@ function WeightPage({ setPage, healthMetrics, weightLog, setWeightLog }) {
       <p style={{ fontSize: '20px', fontWeight: '800', marginBottom: '16px' }}>⚖️ Weight Monitor</p>
       <div style={{ display: 'flex', marginBottom: '20px', backgroundColor: C.card, borderRadius: '10px', padding: '4px', border: `1px solid ${C.cardBorder}` }}>
         {[['log', '📋 Log'], ['insights', '💡 Insights']].map(([key, label]) => (
-          <button key={key} onClick={() => setActiveTab(key)}
-            style={{ flex: 1, padding: '10px', border: 'none', cursor: 'pointer', borderRadius: '8px', backgroundColor: activeTab === key ? C.green : 'transparent', color: activeTab === key ? C.bg : C.textMuted, fontWeight: '700', fontSize: '14px' }}>
-            {label}
-          </button>
+          <button key={key} onClick={() => setActiveTab(key)} style={{ flex: 1, padding: '10px', border: 'none', cursor: 'pointer', borderRadius: '8px', backgroundColor: activeTab === key ? C.green : 'transparent', color: activeTab === key ? C.bg : C.textMuted, fontWeight: '700', fontSize: '14px' }}>{label}</button>
         ))}
       </div>
 
@@ -691,10 +658,7 @@ function WeightPage({ setPage, healthMetrics, weightLog, setWeightLog }) {
               </div>
             ))}
           </div>
-          <Card>
-            <SectionLabel>Weight Trend</SectionLabel>
-            <WeightChart />
-          </Card>
+          <Card><SectionLabel>Weight Trend</SectionLabel><WeightChart /></Card>
           <Card>
             <SectionLabel>{todayEntry ? "Update Today's Weight" : "Log Today's Weight"}</SectionLabel>
             {todayEntry && <p style={{ fontSize: '14px', color: C.textMuted, marginBottom: '10px' }}>Today: <span style={{ color: C.green, fontWeight: '700' }}>{todayEntry.weight} lbs</span></p>}
@@ -734,29 +698,19 @@ function WeightPage({ setPage, healthMetrics, weightLog, setWeightLog }) {
           <Card>
             <SectionLabel>Your Goal</SectionLabel>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <p style={{ margin: 0, fontSize: '13px', color: C.textMuted }}>Start</p>
-                <p style={{ margin: '2px 0 0', fontSize: '22px', fontWeight: '800', color: C.text }}>{startWeight} lbs</p>
-              </div>
+              <div><p style={{ margin: 0, fontSize: '13px', color: C.textMuted }}>Start</p><p style={{ margin: '2px 0 0', fontSize: '22px', fontWeight: '800', color: C.text }}>{startWeight} lbs</p></div>
               <span style={{ fontSize: '24px' }}>{healthMetrics.goal === 'lose' ? '📉' : healthMetrics.goal === 'gain' ? '📈' : '⚖️'}</span>
-              <div style={{ textAlign: 'right' }}>
-                <p style={{ margin: 0, fontSize: '13px', color: C.textMuted }}>Goal</p>
-                <p style={{ margin: '2px 0 0', fontSize: '22px', fontWeight: '800', color: C.yellow }}>{goalWeight} lbs</p>
-              </div>
+              <div style={{ textAlign: 'right' }}><p style={{ margin: 0, fontSize: '13px', color: C.textMuted }}>Goal</p><p style={{ margin: '2px 0 0', fontSize: '22px', fontWeight: '800', color: C.yellow }}>{goalWeight} lbs</p></div>
             </div>
             <div style={{ marginTop: '12px', backgroundColor: '#0f1923', borderRadius: '6px', height: '8px', overflow: 'hidden' }}>
               <div style={{ width: `${Math.min(100, Math.max(0, (Math.abs(totalChange) / Math.abs(startWeight - goalWeight)) * 100))}%`, height: '100%', backgroundColor: C.green, borderRadius: '6px' }} />
             </div>
-            <p style={{ margin: '6px 0 0', fontSize: '12px', color: C.textMuted, textAlign: 'right' }}>
-              {Math.min(100, Math.max(0, Math.round((Math.abs(totalChange) / Math.abs(startWeight - goalWeight)) * 100)))}% to goal
-            </p>
+            <p style={{ margin: '6px 0 0', fontSize: '12px', color: C.textMuted, textAlign: 'right' }}>{Math.min(100, Math.max(0, Math.round((Math.abs(totalChange) / Math.abs(startWeight - goalWeight)) * 100)))}% to goal</p>
           </Card>
           {getWeeklyAvgChange() && (
             <Card>
               <SectionLabel>Weekly Average</SectionLabel>
-              <p style={{ fontSize: '32px', fontWeight: '800', color: parseFloat(getWeeklyAvgChange()) < 0 ? C.green : C.red, margin: '0 0 4px' }}>
-                {parseFloat(getWeeklyAvgChange()) < 0 ? '▼' : '▲'} {Math.abs(getWeeklyAvgChange())} lbs/week
-              </p>
+              <p style={{ fontSize: '32px', fontWeight: '800', color: parseFloat(getWeeklyAvgChange()) < 0 ? C.green : C.red, margin: '0 0 4px' }}>{parseFloat(getWeeklyAvgChange()) < 0 ? '▼' : '▲'} {Math.abs(getWeeklyAvgChange())} lbs/week</p>
               <p style={{ fontSize: '13px', color: C.textMuted, margin: 0 }}>Target: {healthMetrics.pace} lbs/week</p>
             </Card>
           )}
@@ -874,12 +828,9 @@ function CaloriePage({ setPage, healthMetrics, foodLog, setFoodLog }) {
           })
         });
         const data = await response.json();
-        const text = data.content[0].text;
-        const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+        const parsed = JSON.parse(data.content[0].text.replace(/```json|```/g, '').trim());
         setAnalysisResult(parsed);
-      } catch (err) {
-        setAnalysisResult({ error: true });
-      }
+      } catch (err) { setAnalysisResult({ error: true }); }
       setAnalyzing(false);
     };
     reader.readAsDataURL(file);
@@ -911,10 +862,7 @@ function CaloriePage({ setPage, healthMetrics, foodLog, setFoodLog }) {
       </div>
       <div style={{ display: 'flex', marginBottom: '20px', backgroundColor: C.card, borderRadius: '10px', padding: '4px', border: `1px solid ${C.cardBorder}` }}>
         {[['log', '📋 Log'], ['stats', '📊 Stats']].map(([key, label]) => (
-          <button key={key} onClick={() => setActiveTab(key)}
-            style={{ flex: 1, padding: '10px', border: 'none', cursor: 'pointer', borderRadius: '8px', backgroundColor: activeTab === key ? C.green : 'transparent', color: activeTab === key ? C.bg : C.textMuted, fontWeight: '700', fontSize: '14px' }}>
-            {label}
-          </button>
+          <button key={key} onClick={() => setActiveTab(key)} style={{ flex: 1, padding: '10px', border: 'none', cursor: 'pointer', borderRadius: '8px', backgroundColor: activeTab === key ? C.green : 'transparent', color: activeTab === key ? C.bg : C.textMuted, fontWeight: '700', fontSize: '14px' }}>{label}</button>
         ))}
       </div>
 
@@ -957,9 +905,7 @@ function CaloriePage({ setPage, healthMetrics, foodLog, setFoodLog }) {
             ))}
           </div>
 
-          {(todayLog[activeMeal] || []).length === 0 && !adding && (
-            <p style={{ textAlign: 'center', color: C.textMuted, padding: '20px 0' }}>Nothing logged for {activeMeal} yet</p>
-          )}
+          {(todayLog[activeMeal] || []).length === 0 && !adding && <p style={{ textAlign: 'center', color: C.textMuted, padding: '20px 0' }}>Nothing logged for {activeMeal} yet</p>}
           {(todayLog[activeMeal] || []).map(entry => (
             <div key={entry.id} style={{ backgroundColor: C.card, borderRadius: '10px', padding: '12px 14px', marginBottom: '8px', border: `1px solid ${C.cardBorder}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
@@ -1046,15 +992,10 @@ function CaloriePage({ setPage, healthMetrics, foodLog, setFoodLog }) {
 }
 
 // ─── TODO PAGE ────────────────────────────────────────────────────────────────
-function TodoPage({ setPage }) {
+function TodoPage({ dailyTodos, setDailyTodos, longTodos, setLongTodos }) {
   const [tab, setTab] = useState('daily');
   const today = getTodayStr();
   const todayDayIndex = getTodayDayIndex();
-  const [dailyTodos, setDailyTodos] = useState([
-    { id: 1, text: 'Drink 8 glasses of water', done: false, repeatType: 'everyday', repeatDays: [], repeatEvery: 1, startDate: today },
-    { id: 2, text: 'Take vitamins', done: false, repeatType: 'everyday', repeatDays: [], repeatEvery: 1, startDate: today },
-  ]);
-  const [longTodos, setLongTodos] = useState([{ id: 1, text: 'Read a book this month', done: false, dueDate: '' }]);
   const [newTask, setNewTask] = useState('');
   const [repeatType, setRepeatType] = useState('everyday');
   const [repeatDays, setRepeatDays] = useState([]);
@@ -1100,10 +1041,7 @@ function TodoPage({ setPage }) {
       <p style={{ fontSize: '20px', fontWeight: '800', marginBottom: '16px' }}>✅ To-Do List</p>
       <div style={{ display: 'flex', marginBottom: '20px', backgroundColor: C.card, borderRadius: '10px', padding: '4px', border: `1px solid ${C.cardBorder}` }}>
         {[['daily', '📅 Daily'], ['longterm', '🎯 Long Term']].map(([key, label]) => (
-          <button key={key} onClick={() => setTab(key)}
-            style={{ flex: 1, padding: '10px', border: 'none', cursor: 'pointer', borderRadius: '8px', backgroundColor: tab === key ? C.green : 'transparent', color: tab === key ? C.bg : C.textMuted, fontWeight: '700', fontSize: '14px' }}>
-            {label}
-          </button>
+          <button key={key} onClick={() => setTab(key)} style={{ flex: 1, padding: '10px', border: 'none', cursor: 'pointer', borderRadius: '8px', backgroundColor: tab === key ? C.green : 'transparent', color: tab === key ? C.bg : C.textMuted, fontWeight: '700', fontSize: '14px' }}>{label}</button>
         ))}
       </div>
 
@@ -1138,27 +1076,20 @@ function TodoPage({ setPage }) {
             <p style={{ fontSize: '12px', color: C.textMuted, marginBottom: '8px', fontWeight: '600' }}>REPEAT</p>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
               {[['everyday', 'Every Day'], ['days', 'Specific Days'], ['interval', 'Every X Days']].map(([val, label]) => (
-                <button key={val} onClick={() => setRepeatType(val)}
-                  style={{ flex: 1, padding: '8px 4px', borderRadius: '8px', border: `1px solid ${repeatType === val ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: repeatType === val ? C.greenGlow : 'transparent', color: repeatType === val ? C.green : C.textMuted, fontSize: '11px', fontWeight: '700' }}>
-                  {label}
-                </button>
+                <button key={val} onClick={() => setRepeatType(val)} style={{ flex: 1, padding: '8px 4px', borderRadius: '8px', border: `1px solid ${repeatType === val ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: repeatType === val ? C.greenGlow : 'transparent', color: repeatType === val ? C.green : C.textMuted, fontSize: '11px', fontWeight: '700' }}>{label}</button>
               ))}
             </div>
             {repeatType === 'days' && (
               <div style={{ display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' }}>
                 {DAYS.map((day, i) => (
-                  <button key={i} onClick={() => toggleRepeatDay(i)}
-                    style={{ padding: '6px 10px', borderRadius: '8px', border: `1px solid ${repeatDays.includes(i) ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: repeatDays.includes(i) ? C.greenGlow : 'transparent', color: repeatDays.includes(i) ? C.green : C.textMuted, fontSize: '12px', fontWeight: '700' }}>
-                    {day}
-                  </button>
+                  <button key={i} onClick={() => toggleRepeatDay(i)} style={{ padding: '6px 10px', borderRadius: '8px', border: `1px solid ${repeatDays.includes(i) ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: repeatDays.includes(i) ? C.greenGlow : 'transparent', color: repeatDays.includes(i) ? C.green : C.textMuted, fontSize: '12px', fontWeight: '700' }}>{day}</button>
                 ))}
               </div>
             )}
             {repeatType === 'interval' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
                 <span style={{ fontSize: '14px', color: C.textMuted }}>Every</span>
-                <input type="number" min="2" max="30" value={repeatEvery} onChange={e => setRepeatEvery(Number(e.target.value))}
-                  style={{ width: '60px', padding: '8px', borderRadius: '8px', border: `1px solid ${C.cardBorder}`, fontSize: '16px', textAlign: 'center', backgroundColor: '#0f1923', color: C.text }} />
+                <input type="number" min="2" max="30" value={repeatEvery} onChange={e => setRepeatEvery(Number(e.target.value))} style={{ width: '60px', padding: '8px', borderRadius: '8px', border: `1px solid ${C.cardBorder}`, fontSize: '16px', textAlign: 'center', backgroundColor: '#0f1923', color: C.text }} />
                 <span style={{ fontSize: '14px', color: C.textMuted }}>days</span>
               </div>
             )}
@@ -1184,8 +1115,7 @@ function TodoPage({ setPage }) {
             <SectionLabel>Add Long Term Task</SectionLabel>
             <StyledInput placeholder="Task name..." value={newLongTask} onChange={e => setNewLongTask(e.target.value)} />
             <p style={{ fontSize: '12px', color: C.textMuted, marginBottom: '6px', fontWeight: '600' }}>DUE DATE (OPTIONAL)</p>
-            <input type="date" value={newDueDate} onChange={e => setNewDueDate(e.target.value)}
-              style={{ width: '100%', padding: '12px 14px', backgroundColor: '#0f1923', border: `1px solid ${C.cardBorder}`, borderRadius: '8px', fontSize: '15px', color: C.text, boxSizing: 'border-box', marginBottom: '12px', outline: 'none' }} />
+            <input type="date" value={newDueDate} onChange={e => setNewDueDate(e.target.value)} style={{ width: '100%', padding: '12px 14px', backgroundColor: '#0f1923', border: `1px solid ${C.cardBorder}`, borderRadius: '8px', fontSize: '15px', color: C.text, boxSizing: 'border-box', marginBottom: '12px', outline: 'none' }} />
             <GreenButton onClick={addLongTask}>+ ADD TASK</GreenButton>
           </Card>
         </>
@@ -1219,32 +1149,23 @@ function SettingsPage({ setPage, healthMetrics, setHealthMetrics }) {
       </Card>
       <Card>
         <SectionLabel>Activity Level</SectionLabel>
-        {[['sedentary', '🪑 Sedentary'], ['light', '🚶 Light'], ['moderate', '🏃 Moderate'], ['active', '💪 Active'], ['very_active', '🔥 Very Active']].map(([val, label]) => (
-          <button key={val} onClick={() => update('activity', val)}
-            style={{ width: '100%', padding: '10px 14px', marginBottom: '6px', backgroundColor: local.activity === val ? C.greenGlow : '#0f1923', border: `1px solid ${local.activity === val ? C.green : C.cardBorder}`, borderRadius: '8px', cursor: 'pointer', textAlign: 'left', color: local.activity === val ? C.green : C.textMuted, fontWeight: '700', fontSize: '14px' }}>
-            {label}
-          </button>
+        {[['sedentary','🪑 Sedentary'],['light','🚶 Light'],['moderate','🏃 Moderate'],['active','💪 Active'],['very_active','🔥 Very Active']].map(([val, label]) => (
+          <button key={val} onClick={() => update('activity', val)} style={{ width: '100%', padding: '10px 14px', marginBottom: '6px', backgroundColor: local.activity === val ? C.greenGlow : '#0f1923', border: `1px solid ${local.activity === val ? C.green : C.cardBorder}`, borderRadius: '8px', cursor: 'pointer', textAlign: 'left', color: local.activity === val ? C.green : C.textMuted, fontWeight: '700', fontSize: '14px' }}>{label}</button>
         ))}
       </Card>
       <Card>
         <SectionLabel>Goal</SectionLabel>
         <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-          {[['lose', '📉 Lose'], ['maintain', '⚖️ Maintain'], ['gain', '📈 Gain']].map(([val, label]) => (
-            <button key={val} onClick={() => update('goal', val)}
-              style={{ flex: 1, padding: '10px', borderRadius: '10px', border: `1px solid ${local.goal === val ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: local.goal === val ? C.greenGlow : '#0f1923', color: local.goal === val ? C.green : C.textMuted, fontWeight: '700', fontSize: '12px' }}>
-              {label}
-            </button>
+          {[['lose','📉 Lose'],['maintain','⚖️ Maintain'],['gain','📈 Gain']].map(([val, label]) => (
+            <button key={val} onClick={() => update('goal', val)} style={{ flex: 1, padding: '10px', borderRadius: '10px', border: `1px solid ${local.goal === val ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: local.goal === val ? C.greenGlow : '#0f1923', color: local.goal === val ? C.green : C.textMuted, fontWeight: '700', fontSize: '12px' }}>{label}</button>
           ))}
         </div>
         {local.goal !== 'maintain' && (
           <>
             <p style={{ fontSize: '12px', color: C.textMuted, marginBottom: '8px' }}>Weekly Pace (lbs/week)</p>
             <div style={{ display: 'flex', gap: '8px' }}>
-              {['0.5', '1', '1.5', '2'].map(p => (
-                <button key={p} onClick={() => update('pace', p)}
-                  style={{ flex: 1, padding: '10px', borderRadius: '10px', border: `1px solid ${String(local.pace) === p ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: String(local.pace) === p ? C.greenGlow : '#0f1923', color: String(local.pace) === p ? C.green : C.textMuted, fontWeight: '700', fontSize: '13px' }}>
-                  {p}
-                </button>
+              {['0.5','1','1.5','2'].map(p => (
+                <button key={p} onClick={() => update('pace', p)} style={{ flex: 1, padding: '10px', borderRadius: '10px', border: `1px solid ${String(local.pace) === p ? C.green : C.cardBorder}`, cursor: 'pointer', backgroundColor: String(local.pace) === p ? C.greenGlow : '#0f1923', color: String(local.pace) === p ? C.green : C.textMuted, fontWeight: '700', fontSize: '13px' }}>{p}</button>
               ))}
             </div>
           </>
@@ -1257,44 +1178,23 @@ function SettingsPage({ setPage, healthMetrics, setHealthMetrics }) {
 
 // ─── SHARED COMPONENTS ────────────────────────────────────────────────────────
 function BackButton({ setPage, to }) {
-  return (
-    <button onClick={() => setPage(to)} style={{ background: 'none', border: 'none', fontSize: '14px', cursor: 'pointer', color: C.green, fontWeight: '600', marginBottom: '16px', padding: '4px 0', display: 'flex', alignItems: 'center', gap: '6px' }}>
-      ← Back
-    </button>
-  );
+  return <button onClick={() => setPage(to)} style={{ background: 'none', border: 'none', fontSize: '14px', cursor: 'pointer', color: C.green, fontWeight: '600', marginBottom: '16px', padding: '4px 0', display: 'flex', alignItems: 'center', gap: '6px' }}>← Back</button>;
 }
 
 function Card({ children, style = {} }) {
-  return (
-    <div style={{ backgroundColor: C.card, border: `1px solid ${C.cardBorder}`, borderRadius: '12px', padding: '16px', marginBottom: '14px', ...style }}>
-      {children}
-    </div>
-  );
+  return <div style={{ backgroundColor: C.card, border: `1px solid ${C.cardBorder}`, borderRadius: '12px', padding: '16px', marginBottom: '14px', ...style }}>{children}</div>;
 }
 
 function GreenButton({ onClick, children, style = {} }) {
-  return (
-    <button onClick={onClick}
-      style={{ width: '100%', padding: '16px', backgroundColor: C.green, color: C.bg, border: 'none', borderRadius: '10px', fontSize: '16px', fontWeight: '800', cursor: 'pointer', letterSpacing: '0.5px', ...style }}>
-      {children}
-    </button>
-  );
+  return <button onClick={onClick} style={{ width: '100%', padding: '16px', backgroundColor: C.green, color: C.bg, border: 'none', borderRadius: '10px', fontSize: '16px', fontWeight: '800', cursor: 'pointer', letterSpacing: '0.5px', ...style }}>{children}</button>;
 }
 
 function OutlineButton({ onClick, children, style = {} }) {
-  return (
-    <button onClick={onClick}
-      style={{ width: '100%', padding: '12px', backgroundColor: 'transparent', color: C.green, border: `1px solid ${C.green}`, borderRadius: '10px', fontSize: '14px', fontWeight: '700', cursor: 'pointer', ...style }}>
-      {children}
-    </button>
-  );
+  return <button onClick={onClick} style={{ width: '100%', padding: '12px', backgroundColor: 'transparent', color: C.green, border: `1px solid ${C.green}`, borderRadius: '10px', fontSize: '14px', fontWeight: '700', cursor: 'pointer', ...style }}>{children}</button>;
 }
 
 function StyledInput({ placeholder, value, onChange, onKeyDown, type = 'text' }) {
-  return (
-    <input type={type} placeholder={placeholder} value={value} onChange={onChange} onKeyDown={onKeyDown}
-      style={{ width: '100%', padding: '12px 14px', backgroundColor: '#0f1923', border: `1px solid ${C.cardBorder}`, borderRadius: '8px', fontSize: '15px', color: C.text, boxSizing: 'border-box', marginBottom: '10px', outline: 'none' }} />
-  );
+  return <input type={type} placeholder={placeholder} value={value} onChange={onChange} onKeyDown={onKeyDown} style={{ width: '100%', padding: '12px 14px', backgroundColor: '#0f1923', border: `1px solid ${C.cardBorder}`, borderRadius: '8px', fontSize: '15px', color: C.text, boxSizing: 'border-box', marginBottom: '10px', outline: 'none' }} />;
 }
 
 function SectionLabel({ children }) {
